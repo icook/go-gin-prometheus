@@ -30,7 +30,8 @@ var reqDur = &Metric{
 	ID:          "reqDur",
 	Name:        "request_duration_seconds",
 	Description: "The HTTP request latencies in seconds.",
-	Type:        "summary"}
+	Type:        "summary_vec",
+	Args:        []string{"handler", "host", "url"}}
 
 var resSz = &Metric{
 	ID:          "resSz",
@@ -85,11 +86,13 @@ type Metric struct {
 
 // Prometheus contains the metrics gathered by the instance and its path
 type Prometheus struct {
-	reqCnt               *prometheus.CounterVec
-	reqDur, reqSz, resSz prometheus.Summary
-	router               *gin.Engine
-	listenAddress        string
-	Ppg                  PrometheusPushGateway
+	reqCnt        *prometheus.CounterVec
+	reqDur        *prometheus.SummaryVec
+	reqSz, resSz  prometheus.Summary
+	router        *gin.Engine
+	listenAddress string
+	routeMap      map[string]string
+	Ppg           PrometheusPushGateway
 
 	MetricsList []*Metric
 	MetricsPath string
@@ -136,6 +139,7 @@ func NewPrometheus(subsystem string, customMetricsList ...[]*Metric) *Prometheus
 		ReqCntURLLabelMappingFn: func(c *gin.Context) string {
 			return c.Request.URL.String() // i.e. by default do nothing, i.e. return URL as is
 		},
+		routeMap: map[string]string{},
 	}
 
 	p.registerMetrics(subsystem)
@@ -323,7 +327,7 @@ func (p *Prometheus) registerMetrics(subsystem string) {
 		case reqCnt:
 			p.reqCnt = metric.(*prometheus.CounterVec)
 		case reqDur:
-			p.reqDur = metric.(prometheus.Summary)
+			p.reqDur = metric.(*prometheus.SummaryVec)
 		case resSz:
 			p.resSz = metric.(prometheus.Summary)
 		case reqSz:
@@ -337,6 +341,14 @@ func (p *Prometheus) registerMetrics(subsystem string) {
 func (p *Prometheus) Use(e *gin.Engine) {
 	e.Use(p.handlerFunc())
 	p.setMetricsPath(e)
+}
+
+func (p *Prometheus) IndexRoutes(e *gin.Engine) {
+	routeMap := map[string]string{}
+	for _, route := range e.Routes() {
+		routeMap[route.Handler] = route.Path
+	}
+	p.routeMap = routeMap
 }
 
 // UseWithAuth adds the middleware to a gin engine with BasicAuth.
@@ -360,10 +372,10 @@ func (p *Prometheus) handlerFunc() gin.HandlerFunc {
 		status := strconv.Itoa(c.Writer.Status())
 		elapsed := float64(time.Since(start)) / float64(time.Second)
 		resSz := float64(c.Writer.Size())
+		hnd := c.HandlerName()
 
-		p.reqDur.Observe(elapsed)
-		url := p.ReqCntURLLabelMappingFn(c)
-		p.reqCnt.WithLabelValues(status, c.Request.Method, c.HandlerName(), c.Request.Host, url).Inc()
+		p.reqDur.WithLabelValues(hnd, c.Request.Host, p.routeMap[hnd]).Observe(elapsed)
+		p.reqCnt.WithLabelValues(status, c.Request.Method, hnd, c.Request.Host, p.routeMap[hnd]).Inc()
 		p.reqSz.Observe(float64(reqSz))
 		p.resSz.Observe(resSz)
 	}
